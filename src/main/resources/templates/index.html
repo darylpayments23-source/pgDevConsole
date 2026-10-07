@@ -12,6 +12,15 @@ body{background:#f4f6f8}.navbar-brand{font-weight:700}.card{box-shadow:0 2px 10p
 .log .warn{color:#ffc107}.cksum{font-size:11px;color:#6c757d}
 body.auth-pending .container-fluid.py-4{visibility:hidden}
 .temp-pw{font-family:monospace;font-size:1.1rem;letter-spacing:.05em}
+#history tr.hist-row{cursor:pointer}
+#history tr.hist-row:focus-visible{outline:2px solid #0d6efd;outline-offset:-2px}
+.dd-meta dt{font-weight:600;color:#6c757d;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em}
+.dd-meta dd{margin-bottom:.6rem}
+.dd-err{white-space:pre-wrap;word-break:break-word;font-family:monospace;font-size:12px;margin:0;
+  background:#fff5f5;border:1px solid #f1c0c0;border-radius:4px;padding:.4rem .5rem;max-height:240px;overflow:auto}
+#ddScripts tr.dd-failed>td{background:#fde8e8}
+#ddScripts td{vertical-align:top}
+.text-bg-orange{background:#fd7e14!important;color:#fff!important}
 </style>
 </head>
 <body class="auth-pending">
@@ -96,8 +105,8 @@ body.auth-pending .container-fluid.py-4{visibility:hidden}
 <button type="button" class="btn btn-sm btn-outline-secondary flex-fill" onclick="clearHistoryFilters()">Clear</button></div>
 </form>
 <div id="historyMsg"></div>
-<div class="table-responsive"><table class="table table-sm"><thead>
-<tr><th>Date</th><th>Environment</th><th>Deployed by</th><th>Result</th><th>Scripts</th><th>Success</th><th>Failed</th></tr>
+<div class="table-responsive"><table class="table table-sm table-hover"><thead>
+<tr><th>Date</th><th>Environment</th><th>Deployed by</th><th>Result</th><th>Mode</th><th>Scripts</th><th>Success</th><th>Failed</th></tr>
 </thead><tbody id="history"></tbody></table></div>
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
 <div class="d-flex align-items-center gap-2">
@@ -112,6 +121,15 @@ body.auth-pending .container-fluid.py-4{visibility:hidden}
 </div>
 </div>
 </div>
+
+<!-- Deployment details (opened by clicking an Execution History row) -->
+<div class="modal fade" id="detailModal" tabindex="-1" aria-labelledby="detailTitle" aria-hidden="true">
+<div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+<div class="modal-header"><h5 class="modal-title" id="detailTitle">Deployment details</h5>
+<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+<div class="modal-body" id="detailBody"></div>
+<div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button></div>
+</div></div></div>
 
 <!-- Settings: change password -->
 <div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsTitle" aria-hidden="true">
@@ -160,7 +178,7 @@ body.auth-pending .container-fluid.py-4{visibility:hidden}
 </div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"></script>
-<script>
+<script th:inline="none">
 const KEY='pgdep.deploymentId';
 let currentId=null, es=null, envs=[], lastLogged=null, lockEndsAt=null, lockInfo=null, lockEnv=null, lockTimer=null, warned=new Set();
 const isDone=st=>st==='SUCCESS'||st==='FAILED';
@@ -178,6 +196,9 @@ async function init(){
  envs=await api('/api/environments').then(r=>r.json());
  $('env').innerHTML=envs.map(x=>`<option value="${x.key}">${x.name}</option>`).join('');
  $('histFilters').addEventListener('submit',e=>{e.preventDefault();applyHistoryFilters()});
+ $('history').addEventListener('click',e=>{const tr=e.target.closest('tr.hist-row');if(tr)openDetail(tr.dataset.id)});
+ $('history').addEventListener('keydown',e=>{const tr=e.target.closest('tr.hist-row');
+  if(tr&&(e.key==='Enter'||e.key===' ')){e.preventDefault();openDetail(tr.dataset.id)}});
  environmentChanged(); loadHistory();
  await restore();
  refreshLock(); setInterval(refreshLock,10000);
@@ -400,13 +421,95 @@ async function loadHistory(page){
   if(d.content.length===0&&d.totalElements>0&&hist.page>=d.totalPages){return loadHistory(d.totalPages-1)}
   $('historyMsg').innerHTML='';
   hist.totalPages=d.totalPages;
-  $('history').innerHTML=d.content.length?d.content.map(x=>`<tr><td>${esc(x.startedAt||'')}</td><td>${esc(x.environment)}</td><td>${esc(x.deployedBy||'-')}</td>
-<td>${badge(x.status)}</td><td>${x.total}</td><td>${x.successful}</td><td>${x.failed}</td></tr>`).join('')
-   :'<tr><td colspan="7" class="text-center text-muted py-3">No deployments match these filters</td></tr>';
+  $('history').innerHTML=d.content.length?d.content.map(x=>`<tr class="hist-row" data-id="${esc(x.id)}" tabindex="0" title="Show the scripts of this deployment">
+<td>${esc(x.startedAt||'')}</td><td>${esc(x.environment)}</td><td>${esc(x.deployedBy||'-')}</td>
+<td>${badge(x.status)}</td><td><span class="small" title="${esc(commitModeLabel(x.commitMode))}">${esc(x.commitMode==='all'?'All':'Per script')}</span></td>
+<td>${x.total}</td><td>${x.successful}</td><td>${x.failed}</td></tr>`).join('')
+   :'<tr><td colspan="8" class="text-center text-muted py-3">No deployments match these filters</td></tr>';
   $('hInfo').textContent=`Page ${d.totalPages?d.page+1:0} of ${d.totalPages} (${d.totalElements} deployment${d.totalElements===1?'':'s'})`;
   $('hPrev').disabled=d.page<=0;
   $('hNext').disabled=d.page+1>=d.totalPages;
  }catch(e){}
+}
+// ---------------------------------------------------------------------------
+// Deployment details modal. Read-only: opening/closing it never touches the history page or filters,
+// so Close returns to exactly the same list.
+// ---------------------------------------------------------------------------
+const detail={data:null,filter:'all'};
+const OUTCOME={COMMITTED:['success','COMMITTED'],ROLLED_BACK:['orange','ROLLED BACK'],FAILED:['danger','FAILED'],
+  NOT_RUN:['secondary','NOT RUN'],RUNNING:['warning','RUNNING'],PENDING_COMMIT:['info','PENDING COMMIT']};
+const OUTCOME_HINT={COMMITTED:'Executed and committed',ROLLED_BACK:'Executed without error but rolled back because another script or the final commit failed',
+  FAILED:'This script failed',NOT_RUN:'Never executed (skipped, cancelled or pending)',RUNNING:'Executing now',
+  PENDING_COMMIT:'Executed; waiting for the final commit of this commit-all deployment'};
+function commitModeLabel(m){return m==='all'?'Commit all scripts':'Commit after each script'}
+function outcomeBadge(o){const [cls,txt]=OUTCOME[o]||['secondary',o||'?'];
+ return `<span class="badge text-bg-${cls}" title="${esc(OUTCOME_HINT[o]||'')}">${esc(txt)}</span>`}
+function fmtDuration(ms){
+ if(ms==null)return '-'; if(ms<1000)return ms+' ms';
+ const s=ms/1000; if(s<60)return s.toFixed(1)+' s';
+ const m=Math.floor(s/60); return m+' min '+Math.round(s-m*60)+' s';
+}
+let detailModal=null;
+async function openDetail(id){
+ detail.data=null; detail.filter='all';
+ $('detailBody').innerHTML='<div class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm"></div> Loading&hellip;</div>';
+ detailModal=detailModal||new bootstrap.Modal($('detailModal')); detailModal.show();
+ try{
+  const r=await api('/api/history/'+encodeURIComponent(id));
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){$('detailBody').innerHTML='<div class="alert alert-danger">'+esc(d.message||'Could not load the deployment.')+'</div>';return}
+  detail.data=d; renderDetail();
+ }catch(e){ if(!redirecting)$('detailBody').innerHTML='<div class="alert alert-danger">'+esc(e.message)+'</div>' }
+}
+function setDetailFilter(f){detail.filter=f; renderDetail()}
+function renderDetail(){
+ const d=detail.data; if(!d)return;
+ const failedN=d.scripts.filter(x=>x.outcome==='FAILED').length;
+ // Note: never write two opening square brackets in a row in this template: Thymeleaf treats them as an inline expression.
+ const parts=[];
+ parts.push([d.committed,'committed'],[d.rolledBack,'rolled back'],[failedN,'failed'],[d.skipped,'not run']);
+ const running=d.scripts.filter(x=>x.outcome==='RUNNING').length, pend=d.scripts.filter(x=>x.outcome==='PENDING_COMMIT').length;
+ if(running)parts.push([running,'running']); if(pend)parts.push([pend,'pending commit']);
+ const summary=parts.map(([n,t])=>n+' '+t).join(' &middot; ');
+ const shown=d.scripts.filter(x=>detail.filter==='failed'?x.outcome==='FAILED'
+   :detail.filter==='notCommitted'?x.outcome!=='COMMITTED':true);
+ const fbtn=(k,label)=>`<input type="radio" class="btn-check" name="ddFilter" id="ddf-${k}" ${detail.filter===k?'checked':''} onchange="setDetailFilter('${k}')">
+<label class="btn btn-outline-secondary" for="ddf-${k}">${label}</label>`;
+ $('detailTitle').innerHTML='Deployment details &mdash; '+esc(String(d.environment||'').toUpperCase())+' '+badge(esc(d.status));
+ $('detailBody').innerHTML=`
+<dl class="row dd-meta mb-2">
+ <div class="col-6 col-md-3"><dt>Environment</dt><dd>${esc(d.environment)}</dd></div>
+ <div class="col-6 col-md-3"><dt>Result</dt><dd>${badge(esc(d.status))}</dd></div>
+ <div class="col-6 col-md-3"><dt>Commit mode</dt><dd>${esc(commitModeLabel(d.commitMode))}</dd></div>
+ <div class="col-6 col-md-3"><dt>Deployed by</dt><dd>${esc(d.deployedBy||'-')}</dd></div>
+ <div class="col-6 col-md-3"><dt>Started</dt><dd>${esc(fmtTime(d.startedAt))}</dd></div>
+ <div class="col-6 col-md-3"><dt>Completed</dt><dd>${esc(d.completedAt?fmtTime(d.completedAt):(d.status==='RUNNING'||d.status==='PENDING'?'In progress':'-'))}</dd></div>
+ <div class="col-6 col-md-3"><dt>Total duration</dt><dd>${esc(fmtDuration(d.durationMs))}</dd></div>
+ <div class="col-6 col-md-3"><dt>Folder</dt><dd class="text-break"><code>${esc(d.folder)}</code></dd></div>
+</dl>
+${d.error?`<div class="alert alert-danger py-2"><strong>Deployment error</strong><pre class="dd-err mt-1 bg-transparent border-0 p-0">${esc(d.error)}</pre></div>`:''}
+${d.rolledBack?`<div class="alert alert-warning py-2">&#9888; <strong>Commit-all mode:</strong> ${d.rolledBack} script${d.rolledBack===1?'':'s'} executed successfully but ${d.rolledBack===1?'was':'were'} rolled back because ${failedN?'a later script failed':'the final commit failed'}. No changes from this deployment were applied.</div>`:''}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+ <div class="small"><strong>${d.scripts.length}</strong> script${d.scripts.length===1?'':'s'}: ${summary}</div>
+ <div class="btn-group btn-group-sm" role="group" aria-label="Filter scripts">${fbtn('all','All')}${fbtn('failed','Failed only')}${fbtn('notCommitted','Not committed')}</div>
+</div>
+<div class="table-responsive"><table class="table table-sm">
+<thead><tr><th>#</th><th>Script</th><th>Outcome</th><th>Duration</th><th>Checksum</th><th style="min-width:280px">Error</th></tr></thead>
+<tbody id="ddScripts">${shown.length?shown.map(x=>`<tr class="${x.outcome==='FAILED'?'dd-failed':''}">
+<td>${esc(x.order)}</td>
+<td><code>${esc(x.path)}</code></td>
+<td>${outcomeBadge(x.outcome)}${x.status&&x.outcome!==x.status?`<div class="cksum" title="Stored script status">status ${esc(x.status)}</div>`:''}</td>
+<td class="text-nowrap">${esc(fmtDuration(x.durationMs))}</td>
+<td>${x.checksum?`<span class="cksum" title="SHA-256: ${esc(x.checksum)}">${esc(x.checksum.substring(0,12))}&hellip;</span>`:'<span class="text-muted">-</span>'}${x.checksumChanged?` <span class="badge text-bg-warning" title="Checksum differed from the last successful execution in this environment">&#9888; modified</span>`:''}</td>
+<td>${x.error?`<pre class="dd-err">${esc(x.error)}</pre><button type="button" class="btn btn-link btn-sm p-0 mt-1" onclick="copyDetailError(${Number(x.order)},this)">Copy error</button>`:''}</td>
+</tr>`).join(''):`<tr><td colspan="6" class="text-center text-muted py-3">No scripts match this filter</td></tr>`}</tbody>
+</table></div>`;
+}
+async function copyDetailError(order,btn){
+ const x=detail.data&&detail.data.scripts.find(s=>s.order===order); if(!x)return;
+ try{ await navigator.clipboard.writeText(x.error||''); btn.textContent='Copied'; }
+ catch(e){ btn.textContent='Copy failed'; }
+ setTimeout(()=>{btn.textContent='Copy error'},1500);
 }
 function showError(x){$('message').innerHTML='<div class="alert alert-danger">'+esc(x)+'</div>'}
 function esc(x){return String(x??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}

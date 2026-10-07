@@ -15,6 +15,8 @@ A Spring Boot 3 / Java 21 web application for controlled PostgreSQL SQL-script d
 - Real-time execution status through Server-Sent Events (SSE)
 - Per-script duration and error display
 - Deployment history API/UI (server-side pagination and filters by environment, status, user and date)
+- Deployment history details: click a history row to see every script of that deployment, which failed and why,
+  and which were rolled back in commit-all mode
 - Distributed deployment locking (one deployment per environment across all instances)
 - PostgreSQL dollar-quoted function/procedure support
 - Safe relative-path resolution to prevent path traversal
@@ -131,7 +133,8 @@ GET /api/history?page=0&size=25&environment=prod&status=FAILED&deployedBy=alice&
 {
   "content": [
     {"id": "...", "environment": "prod", "folder": "...", "status": "FAILED", "total": 12,
-     "successful": 7, "failed": 1, "startedAt": "...", "completedAt": "...", "deployedBy": "alice"}
+     "successful": 7, "failed": 1, "startedAt": "...", "completedAt": "...", "deployedBy": "alice",
+     "commitMode": "all"}
   ],
   "page": 0,
   "size": 25,
@@ -165,6 +168,60 @@ GET /api/history?page=0&size=25&environment=prod&status=FAILED&deployedBy=alice&
 The **Execution History** card has a filter bar (Environment, Status, Deployed by, From/To, Apply/Clear),
 Prev/Next paging with "Page X of Y (N deployments)" and a 25/50/100 page-size selector. Refresh keeps the
 current page and filters; when a deployment finishes the card jumps back to page 1.
+Each row also shows the commit mode (`commitMode`: `script` or `all`).
+
+### History details (per-script drill-down)
+
+```http
+GET /api/history/{id}
+```
+
+```json
+{
+  "id": "6f1c0a5e-...", "environment": "dev", "folder": "C:\\deploy\\release-001",
+  "status": "FAILED", "commitMode": "all", "deployedBy": "alice",
+  "startedAt": "2026-10-01T08:00:00Z", "completedAt": "2026-10-01T08:00:08.123Z", "durationMs": 8123, "error": null,
+  "total": 5, "successful": 2, "failed": 1,
+  "committed": 0, "rolledBack": 2, "skipped": 2,
+  "scripts": [
+    {"order": 1, "path": "001_schema/001_create_schema.sql", "filename": "001_create_schema.sql",
+     "sequence": 1, "status": "SUCCESS", "outcome": "ROLLED_BACK", "durationMs": 120,
+     "error": null, "checksum": "ab12...", "checksumChanged": false},
+    {"order": 3, "...": "...", "status": "FAILED", "outcome": "FAILED",
+     "error": "ERROR: relation \"x\" does not exist"},
+    {"order": 4, "...": "...", "status": "SKIPPED", "outcome": "NOT_RUN"}
+  ]
+}
+```
+
+- Scripts are sorted by `script_order` (execution order).
+- Read from the history database, so it works for old deployments and after an application restart.
+- `404 {"error":"NOT_FOUND","message":"Deployment <id> not found"}` for an unknown or invalid (non-UUID) id;
+  `503` if the history database cannot be read. Requires login (any role).
+- `status` is the stored script status and is never changed. `outcome` is derived on read:
+
+| `outcome` | Rule | Meaning |
+|---|---|---|
+| `COMMITTED` | status `SUCCESS` and (commit mode `script` **or** deployment status `SUCCESS`) | The script's changes are in the database. |
+| `ROLLED_BACK` | status `SUCCESS`, commit mode `all`, deployment status `FAILED` | Executed fine but undone, because another script **or the final COMMIT** failed. |
+| `FAILED` | status `FAILED` | The script itself failed; its error is in `error`. |
+| `NOT_RUN` | status `SKIPPED`, `CANCELLED` or `PENDING` | Never executed (e.g. skipped after a failure). |
+| `RUNNING` | status `RUNNING` | Executing now (deployment in progress). |
+| `PENDING_COMMIT` | status `SUCCESS`, commit mode `all`, deployment still `RUNNING`/`PENDING` | Executed; waiting for the final commit. Turns into `COMMITTED` or `ROLLED_BACK` when the deployment ends. |
+
+- Deployment-level `committed` / `rolledBack` / `skipped` count scripts with outcome `COMMITTED` / `ROLLED_BACK` /
+  `NOT_RUN`. `total` / `successful` / `failed` are the stored header counts (same as the list).
+- The rules live in one place: `ScriptOutcome.of(scriptStatus, commitMode, deploymentStatus)`.
+- No schema change: the `(deployment_id, script_order)` primary key already serves the scripts query in order
+  (checked with `EXPLAIN`: index scan on `deployment_script_history_pkey`, no sort).
+
+**UI:** clicking (or Enter on) any Execution History row opens a **Deployment details** modal with the
+environment, result, commit mode ("Commit after each script" / "Commit all scripts"), deployed by, start/completion
+time, total duration and any deployment-level error; a summary line ("2 committed · 2 rolled back · 1 failed ·
+2 not run"); a warning banner when scripts were rolled back in commit-all mode; and a scripts table (#, script,
+outcome badge, duration, checksum with a "modified" marker, full error text with a Copy button; failed row
+highlighted). An All / Failed only / Not committed toggle filters the table. Closing the modal returns to the
+history list on the same page with the same filters.
 
 ## Filename convention
 

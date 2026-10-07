@@ -1,6 +1,7 @@
 package com.example.deploymentconsole.service;
 
 import com.example.deploymentconsole.config.AppProperties;
+import com.example.deploymentconsole.model.DeploymentDetail;
 import com.example.deploymentconsole.model.HistoryQuery;
 import com.example.deploymentconsole.model.PageResult;
 import com.example.deploymentconsole.model.ScriptInfo;
@@ -160,6 +161,69 @@ public class HistoryService {
         }
     }
 
+    /** Header of one deployment (bind: id). */
+    static final String DETAIL_HEADER_SQL = """
+            SELECT id, environment, folder, status, commit_mode, deployed_by, started_at, completed_at, error,
+                   total_scripts, successful_scripts, failed_scripts
+              FROM deployment_history
+             WHERE id = ?""";
+
+    /** Every script of one deployment in execution order (bind: id). Served by the (deployment_id, script_order) PK. */
+    static final String DETAIL_SCRIPTS_SQL = """
+            SELECT script_order, path, filename, sequence, status, duration_ms, error, checksum, checksum_changed
+              FROM deployment_script_history
+             WHERE deployment_id = ?
+             ORDER BY script_order""";
+
+    /**
+     * One deployment with every script that ran under it and each script's derived {@link
+     * com.example.deploymentconsole.model.ScriptOutcome outcome}. Read from the history database, so it works for
+     * old deployments and after a restart.
+     *
+     * @return empty for an unknown or non-UUID id
+     * @throws IllegalStateException if the history database cannot be read
+     */
+    public Optional<DeploymentDetail> detail(String id) {
+        UUID uuid;
+        try { uuid = UUID.fromString(id == null ? "" : id.trim()); } catch (IllegalArgumentException e) { return Optional.empty(); }
+
+        try (Connection c = connect()) {
+            DeploymentDetail.Header header;
+            try (PreparedStatement p = c.prepareStatement(DETAIL_HEADER_SQL)) {
+                p.setObject(1, uuid);
+                try (ResultSet rs = p.executeQuery()) {
+                    if (!rs.next()) return Optional.empty();
+                    Timestamp started = rs.getTimestamp("started_at"), completed = rs.getTimestamp("completed_at");
+                    header = new DeploymentDetail.Header(rs.getString("id"), rs.getString("environment"),
+                            rs.getString("folder"), rs.getString("status"), rs.getString("commit_mode"),
+                            rs.getString("deployed_by"),
+                            started == null ? null : started.toInstant(),
+                            completed == null ? null : completed.toInstant(),
+                            rs.getString("error"), rs.getInt("total_scripts"),
+                            rs.getInt("successful_scripts"), rs.getInt("failed_scripts"));
+                }
+            }
+            List<DeploymentDetail.ScriptRow> rows = new ArrayList<>();
+            try (PreparedStatement p = c.prepareStatement(DETAIL_SCRIPTS_SQL)) {
+                p.setObject(1, uuid);
+                try (ResultSet rs = p.executeQuery()) {
+                    while (rs.next()) {
+                        long d = rs.getLong("duration_ms");
+                        Long duration = rs.wasNull() ? null : d;
+                        rows.add(new DeploymentDetail.ScriptRow(rs.getInt("script_order"), rs.getString("path"),
+                                rs.getString("filename"), rs.getLong("sequence"), rs.getString("status"),
+                                duration, rs.getString("error"), rs.getString("checksum"),
+                                rs.getBoolean("checksum_changed")));
+                    }
+                }
+            }
+            return Optional.of(DeploymentDetail.of(header, rows));
+        } catch (SQLException e) {
+            System.err.println("Could not read deployment " + id + ": " + e.getMessage());
+            throw new IllegalStateException("The history database is unavailable.", e);
+        }
+    }
+
     // A script counts as "previously executed" only if it succeeded. In commit-all mode a script marked
     // SUCCESS is only really applied if the whole deployment succeeded, so require that too.
     private static final String PREVIOUS_FILTER = """
@@ -300,6 +364,7 @@ public class HistoryService {
         m.put("startedAt", rs.getTimestamp("started_at"));
         m.put("completedAt", rs.getTimestamp("completed_at"));
         m.put("deployedBy", rs.getString("deployed_by"));
+        m.put("commitMode", rs.getString("commit_mode"));
         return m;
     }
 }

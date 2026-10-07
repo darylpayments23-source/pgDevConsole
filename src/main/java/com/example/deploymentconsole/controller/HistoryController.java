@@ -1,6 +1,7 @@
 package com.example.deploymentconsole.controller;
 
 import com.example.deploymentconsole.config.RequireAuth;
+import com.example.deploymentconsole.model.DeploymentDetail;
 import com.example.deploymentconsole.model.HistoryQuery;
 import com.example.deploymentconsole.model.PageResult;
 import com.example.deploymentconsole.service.HistoryService;
@@ -14,6 +15,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Paged, filterable deployment history.
@@ -22,6 +24,12 @@ import java.util.Map;
  *
  * Without parameters it returns the first page (25 newest deployments). Invalid parameters give
  * {@code 400 {"error":"BAD_REQUEST","message":"..."}}.
+ *
+ * <pre>GET /api/history/{id}</pre>
+ *
+ * One deployment with every script that ran under it and each script's derived outcome
+ * (COMMITTED / ROLLED_BACK / FAILED / NOT_RUN / RUNNING / PENDING_COMMIT). Unknown or non-UUID id gives
+ * {@code 404 {"error":"NOT_FOUND","message":"Deployment <id> not found"}}.
  */
 @RestController
 @RequestMapping("/api/history")
@@ -45,6 +53,15 @@ public class HistoryController {
         // HistoryQuery validates page >= 0, 1 <= size <= 200 and from <= to (IllegalArgumentException -> 400).
         var q = new HistoryQuery(environment, status, deployedBy, date("from", from), date("to", to), page, size);
         return service.list(q);
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<?> detail(@PathVariable String id) {
+        // Read from the history database (not the in-memory job map), so old deployments work after a restart.
+        // IllegalStateException (database unavailable) -> 503 via unavailable().
+        Optional<DeploymentDetail> d = service.detail(id);
+        if (d.isEmpty()) return body(404, "NOT_FOUND", "Deployment " + id + " not found");
+        return ResponseEntity.ok(d.get());
     }
 
     /** Parses an optional ISO date (yyyy-MM-dd); blank = no filter. */

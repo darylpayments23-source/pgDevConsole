@@ -52,7 +52,8 @@ final class HistoryFilterSql {
     /** Page query; after {@code w.params()} bind LIMIT (size) and OFFSET (page * size). */
     static String pageSql(Where w) {
         return "SELECT id, environment, folder, status, total_scripts,\n"
-                + "       successful_scripts, failed_scripts, started_at, completed_at, deployed_by\n"
+                + "       successful_scripts, failed_scripts, started_at, completed_at, deployed_by,\n"
+                + "       commit_mode\n"
                 + "FROM deployment_history" + w.sql() + "\n"
                 + "ORDER BY started_at DESC, id DESC\n"            // id breaks ties so paging is stable
                 + "LIMIT ? OFFSET ?";
