@@ -1,0 +1,47 @@
+server:
+  port: 8083
+
+spring:
+  thymeleaf:
+    cache: false
+  datasource:
+    url: jdbc:postgresql://localhost:5435/pgDevConsole
+    username: test
+    password: test
+    driver-class-name: org.postgresql.Driver
+
+app:
+  databases:
+    dev:
+      name: DEV
+      url: jdbc:postgresql://localhost:5435/pgDevConsole
+      username: test
+      password: test
+    uat:
+      name: UAT
+      url: jdbc:postgresql://localhost:5435/pgDevConsole
+      username: test
+      password: test
+    prod:
+      name: PROD
+      url: jdbc:postgresql://localhost:5435/pgDevConsole
+      username: test
+      password: test
+
+  execution:
+    max-concurrent-deployments: 1
+    script-timeout-seconds: 1800
+    lock-timeout-minutes: 30   # per-environment deployment lock expires after this many minutes
+    history-db: jdbc:postgresql://localhost:5435/pgDevConsole
+    history-username: test
+    history-password: test
+    require-confirmation-for-modified: true   # true = block scripts changed since their last successful run until the operator confirms
+
+  # User authentication (users live in the history database, table "users"; see schema-auth.sql)
+  auth:
+    jwt-secret: ${JWT_SECRET:change-me-in-production}   # HMAC-SHA256 signing secret; set JWT_SECRET in production
+    jwt-expiry-hours: 24
+    superadmin-default-username: admin
+    superadmin-default-password: ${SUPERADMIN_PASSWORD:admin123}   # only used to create the account on first startup
+    bcrypt-strength: 10                                            # bcrypt cost factor (salt rounds)
+    min-password-length: 8

@@ -1,0 +1,6 @@
+CREATE OR REPLACE FUNCTION demo.customer_count()
+RETURNS BIGINT LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN (SELECT COUNT(*) FROM demo.customer);
+END;
+$$;
