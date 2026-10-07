@@ -62,3 +62,12 @@ CREATE INDEX IF NOT EXISTS idx_script_history_path_checksum
 -- Safe to re-run: every statement is idempotent.
 -- ---------------------------------------------------------------------------
 ALTER TABLE deployment_history ADD COLUMN IF NOT EXISTS deployed_by VARCHAR(50);
+
+-- ---------------------------------------------------------------------------
+-- History pagination & filtering (GET /api/history?environment=&status=&deployedBy=&from=&to=&page=&size=).
+-- Safe to re-run: every statement is idempotent.
+-- ---------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_deployment_history_env_started
+    ON deployment_history(lower(environment), started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deployment_history_status_started
+    ON deployment_history(status, started_at DESC);

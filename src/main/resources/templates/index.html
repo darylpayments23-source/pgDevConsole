@@ -76,9 +76,38 @@ body.auth-pending .container-fluid.py-4{visibility:hidden}
 <div class="card p-4 mt-4">
 <div class="d-flex justify-content-between"><h5>Execution History</h5>
 <button class="btn btn-sm btn-outline-secondary" onclick="loadHistory()">Refresh</button></div>
+<form id="histFilters" class="row g-2 align-items-end mb-2" novalidate>
+<div class="col-6 col-md-2"><label class="form-label small mb-1" for="hEnv">Environment</label>
+<select id="hEnv" class="form-select form-select-sm">
+<option value="">All</option><option value="dev">DEV</option><option value="uat">UAT</option><option value="prod">PROD</option>
+</select></div>
+<div class="col-6 col-md-2"><label class="form-label small mb-1" for="hStatus">Status</label>
+<select id="hStatus" class="form-select form-select-sm">
+<option value="">All</option><option>SUCCESS</option><option>FAILED</option><option>RUNNING</option>
+</select></div>
+<div class="col-12 col-md-2"><label class="form-label small mb-1" for="hUser">Deployed by</label>
+<input id="hUser" class="form-control form-control-sm" placeholder="username" autocomplete="off"></div>
+<div class="col-6 col-md-2"><label class="form-label small mb-1" for="hFrom">From</label>
+<input id="hFrom" type="date" class="form-control form-control-sm"></div>
+<div class="col-6 col-md-2"><label class="form-label small mb-1" for="hTo">To</label>
+<input id="hTo" type="date" class="form-control form-control-sm"></div>
+<div class="col-12 col-md-2 d-flex gap-2">
+<button type="submit" class="btn btn-sm btn-primary flex-fill">Apply</button>
+<button type="button" class="btn btn-sm btn-outline-secondary flex-fill" onclick="clearHistoryFilters()">Clear</button></div>
+</form>
+<div id="historyMsg"></div>
 <div class="table-responsive"><table class="table table-sm"><thead>
 <tr><th>Date</th><th>Environment</th><th>Deployed by</th><th>Result</th><th>Scripts</th><th>Success</th><th>Failed</th></tr>
 </thead><tbody id="history"></tbody></table></div>
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+<div class="d-flex align-items-center gap-2">
+<button id="hPrev" class="btn btn-sm btn-outline-secondary" onclick="historyPage(-1)" disabled>&laquo; Prev</button>
+<button id="hNext" class="btn btn-sm btn-outline-secondary" onclick="historyPage(1)" disabled>Next &raquo;</button>
+<span id="hInfo" class="small text-muted"></span></div>
+<div class="d-flex align-items-center gap-2"><label class="small text-muted" for="hSize">Per page</label>
+<select id="hSize" class="form-select form-select-sm w-auto" onchange="historySizeChanged()">
+<option>25</option><option>50</option><option>100</option></select></div>
+</div>
 </div>
 </div>
 </div>
@@ -148,6 +177,7 @@ async function init(){
  if(!await authenticate())return;
  envs=await api('/api/environments').then(r=>r.json());
  $('env').innerHTML=envs.map(x=>`<option value="${x.key}">${x.name}</option>`).join('');
+ $('histFilters').addEventListener('submit',e=>{e.preventDefault();applyHistoryFilters()});
  environmentChanged(); loadHistory();
  await restore();
  refreshLock(); setInterval(refreshLock,10000);
@@ -224,7 +254,7 @@ function applyState(s){
 function onFinished(s,enableButton){
  if(es){es.close();es=null}
  if(enableButton)setExecEnabled(true);
- setTimeout(loadHistory,700);   // history row is written just after the final status is published
+ setTimeout(()=>loadHistory(0),700);   // history row is written just after the final status is published; show newest
  log('Deployment '+s.status+'.'); if(s.error)log('ERROR: '+s.error);
 }
 // Server-Sent Events read through fetch(), because EventSource cannot send the Authorization header.
@@ -338,11 +368,44 @@ async function refreshLock(){
   } else if(lockInfo||$('lockBanner').innerHTML){ showLock(null,env); }
  }catch(e){}
 }
-async function loadHistory(){
+// History paging/filter state. Filters take effect on Apply; Refresh re-reads the current page with them.
+const hist={page:0,size:25,filters:{},totalPages:0};
+function readHistoryFilters(){
+ return {environment:$('hEnv').value,status:$('hStatus').value,deployedBy:$('hUser').value.trim(),
+         from:$('hFrom').value,to:$('hTo').value};
+}
+function applyHistoryFilters(){
+ const f=readHistoryFilters();
+ if(f.from&&f.to&&f.from>f.to){$('historyMsg').innerHTML='<div class="alert alert-warning py-1 small">"From" must not be after "To".</div>';return}
+ hist.filters=f; hist.page=0; loadHistory();
+}
+function clearHistoryFilters(){
+ $('histFilters').reset(); hist.filters={}; hist.page=0; loadHistory();
+}
+function historyPage(delta){
+ const p=hist.page+delta; if(p<0||(hist.totalPages&&p>=hist.totalPages))return;
+ hist.page=p; loadHistory();
+}
+function historySizeChanged(){ hist.size=+$('hSize').value; hist.page=0; loadHistory(); }
+// page: undefined = keep the current page (Refresh); 0 = jump to the newest deployments.
+async function loadHistory(page){
+ if(page!==undefined)hist.page=page;
+ const qs=new URLSearchParams({page:hist.page,size:hist.size});
+ for(const [k,v] of Object.entries(hist.filters))if(v)qs.set(k,v);
  try{
-  const data=await api('/api/history').then(r=>r.json());
-  $('history').innerHTML=data.map(x=>`<tr><td>${esc(x.startedAt||'')}</td><td>${esc(x.environment)}</td><td>${esc(x.deployedBy||'-')}</td>
-<td>${badge(x.status)}</td><td>${x.total}</td><td>${x.successful}</td><td>${x.failed}</td></tr>`).join('');
+  const r=await api('/api/history?'+qs);
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){$('historyMsg').innerHTML='<div class="alert alert-danger py-1 small">'+esc(d.message||'Could not load history.')+'</div>';return}
+  // The page may have emptied (e.g. filters changed elsewhere, rows removed): fall back to the last page.
+  if(d.content.length===0&&d.totalElements>0&&hist.page>=d.totalPages){return loadHistory(d.totalPages-1)}
+  $('historyMsg').innerHTML='';
+  hist.totalPages=d.totalPages;
+  $('history').innerHTML=d.content.length?d.content.map(x=>`<tr><td>${esc(x.startedAt||'')}</td><td>${esc(x.environment)}</td><td>${esc(x.deployedBy||'-')}</td>
+<td>${badge(x.status)}</td><td>${x.total}</td><td>${x.successful}</td><td>${x.failed}</td></tr>`).join('')
+   :'<tr><td colspan="7" class="text-center text-muted py-3">No deployments match these filters</td></tr>';
+  $('hInfo').textContent=`Page ${d.totalPages?d.page+1:0} of ${d.totalPages} (${d.totalElements} deployment${d.totalElements===1?'':'s'})`;
+  $('hPrev').disabled=d.page<=0;
+  $('hNext').disabled=d.page+1>=d.totalPages;
  }catch(e){}
 }
 function showError(x){$('message').innerHTML='<div class="alert alert-danger">'+esc(x)+'</div>'}

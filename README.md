@@ -14,7 +14,7 @@ A Spring Boot 3 / Java 21 web application for controlled PostgreSQL SQL-script d
 - Commit-per-script or commit-all mode
 - Real-time execution status through Server-Sent Events (SSE)
 - Per-script duration and error display
-- Deployment history API/UI
+- Deployment history API/UI (server-side pagination and filters by environment, status, user and date)
 - Distributed deployment locking (one deployment per environment across all instances)
 - PostgreSQL dollar-quoted function/procedure support
 - Safe relative-path resolution to prevent path traversal
@@ -121,11 +121,50 @@ or `"locked":false,"lock":null` when the environment is free.
 GET /api/environments
 ```
 
-### History
+### History (paged & filterable)
 
 ```http
-GET /api/history
+GET /api/history?page=0&size=25&environment=prod&status=FAILED&deployedBy=alice&from=2026-01-01&to=2026-01-31
 ```
+
+```json
+{
+  "content": [
+    {"id": "...", "environment": "prod", "folder": "...", "status": "FAILED", "total": 12,
+     "successful": 7, "failed": 1, "startedAt": "...", "completedAt": "...", "deployedBy": "alice"}
+  ],
+  "page": 0,
+  "size": 25,
+  "totalElements": 1342,
+  "totalPages": 54
+}
+```
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `page` | `0` | 0-based page number; must be `>= 0`. A page past the end returns empty `content` with the real totals. |
+| `size` | `25` | Rows per page, `1`–`200`. Larger values are rejected with `400`. |
+| `environment` | – | Exact match, case-insensitive (`prod`, `PROD`). |
+| `status` | – | Exact match, case-insensitive (`SUCCESS`, `FAILED`, `RUNNING`, `PENDING`). |
+| `deployedBy` | – | Exact username match, case-insensitive. |
+| `from` / `to` | – | `yyyy-MM-dd`, inclusive, applied to `started_at` in the **server's time zone**. `from` must not be after `to`. |
+
+- Every filter is optional and they combine with AND; `totalElements`/`totalPages` count the filtered rows.
+- Sorted by `started_at` descending (newest first; ties broken by `id` so pages are stable).
+- Requires login (any role).
+- `GET /api/history` with no parameters returns the first page (25 newest deployments).
+  **Note:** the response is now the page object above, not a bare JSON array — read the rows from `content`.
+- Filter values are always bound as JDBC parameters, never concatenated into the SQL.
+- Invalid input returns `400`, e.g.
+  `{"error":"BAD_REQUEST","message":"size must be between 1 and 200."}`,
+  `{"error":"BAD_REQUEST","message":"from must be a valid date in yyyy-MM-dd format (got '2026-13-01')."}`.
+  `503` if the history database cannot be read.
+- **Re-run `src/main/resources/schema-history.sql`** to add the filter indexes
+  (`idx_deployment_history_env_started`, `idx_deployment_history_status_started`; idempotent).
+
+The **Execution History** card has a filter bar (Environment, Status, Deployed by, From/To, Apply/Clear),
+Prev/Next paging with "Page X of Y (N deployments)" and a 25/50/100 page-size selector. Refresh keeps the
+current page and filters; when a deployment finishes the card jumps back to page 1.
 
 ## Filename convention
 

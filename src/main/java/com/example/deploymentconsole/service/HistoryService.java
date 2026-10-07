@@ -1,6 +1,8 @@
 package com.example.deploymentconsole.service;
 
 import com.example.deploymentconsole.config.AppProperties;
+import com.example.deploymentconsole.model.HistoryQuery;
+import com.example.deploymentconsole.model.PageResult;
 import com.example.deploymentconsole.model.ScriptInfo;
 import com.example.deploymentconsole.model.ScriptStatus;
 import org.springframework.stereotype.Service;
@@ -243,29 +245,61 @@ public class HistoryService {
         }
     }
 
-    public List<Map<String,Object>> list() {
-        List<Map<String,Object>> out=new ArrayList<>();
-        String sql="SELECT id, environment, folder, status, total_scripts,\n"
-                    +"successful_scripts, failed_scripts, started_at, completed_at, deployed_by\n"
-        +"FROM deployment_history ORDER BY started_at DESC LIMIT 100";
-        try(Connection c=connect(); Statement s=c.createStatement(); ResultSet rs=s.executeQuery(sql)){
-            while(rs.next()){
-                Map<String,Object> m=new LinkedHashMap<>();
-                m.put("id",rs.getString("id"));
-                m.put("environment",rs.getString("environment"));
-                m.put("folder",rs.getString("folder"));
-                m.put("status",rs.getString("status"));
-                m.put("total",rs.getInt("total_scripts"));
-                m.put("successful",rs.getInt("successful_scripts"));
-                m.put("failed",rs.getInt("failed_scripts"));
-                m.put("startedAt",rs.getTimestamp("started_at"));
-                m.put("completedAt",rs.getTimestamp("completed_at"));
-                m.put("deployedBy",rs.getString("deployed_by"));
-                out.add(m);
+    private static void bind(PreparedStatement p, List<Object> params) throws SQLException {
+        for (int i = 0; i < params.size(); i++) p.setObject(i + 1, params.get(i));
+    }
+
+    /** First page of history, newest first, no filters. */
+    public PageResult<Map<String,Object>> list() {
+        return list(HistoryQuery.firstPage());
+    }
+
+    /**
+     * One page of deployment history matching {@code q}, newest first, with the total count for the same filters.
+     *
+     * @throws IllegalStateException if the history database cannot be read
+     */
+    public PageResult<Map<String,Object>> list(HistoryQuery q) {
+        HistoryFilterSql.Where w = HistoryFilterSql.where(q);
+        String countSql = HistoryFilterSql.countSql(w);
+        String pageSql = HistoryFilterSql.pageSql(w);
+        try (Connection c = connect()) {
+            long total;
+            try (PreparedStatement p = c.prepareStatement(countSql)) {
+                bind(p, w.params());
+                try (ResultSet rs = p.executeQuery()) { rs.next(); total = rs.getLong(1); }
             }
-        } catch(SQLException e) {
+            List<Map<String,Object>> out = new ArrayList<>();
+            if (total > q.offset()) {                          // skip the page query when the page is past the end
+                try (PreparedStatement p = c.prepareStatement(pageSql)) {
+                    bind(p, w.params());
+                    int n = w.params().size();
+                    p.setInt(n + 1, q.size());
+                    p.setLong(n + 2, q.offset());
+                    try (ResultSet rs = p.executeQuery()) {
+                        while (rs.next()) out.add(row(rs));
+                    }
+                }
+            }
+            return PageResult.of(out, q.page(), q.size(), total);
+        } catch (SQLException e) {
             System.err.println("Could not read deployment history: " + e.getMessage());
+            throw new IllegalStateException("The history database is unavailable.", e);
         }
-        return out;
+    }
+
+    private static Map<String,Object> row(ResultSet rs) throws SQLException {
+        Map<String,Object> m = new LinkedHashMap<>();
+        m.put("id", rs.getString("id"));
+        m.put("environment", rs.getString("environment"));
+        m.put("folder", rs.getString("folder"));
+        m.put("status", rs.getString("status"));
+        m.put("total", rs.getInt("total_scripts"));
+        m.put("successful", rs.getInt("successful_scripts"));
+        m.put("failed", rs.getInt("failed_scripts"));
+        m.put("startedAt", rs.getTimestamp("started_at"));
+        m.put("completedAt", rs.getTimestamp("completed_at"));
+        m.put("deployedBy", rs.getString("deployed_by"));
+        return m;
     }
 }
